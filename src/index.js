@@ -1,3 +1,4 @@
+
 const j=(x,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{"content-type":"application/json"}});
 const h=(x,s=200)=>new Response(x,{status:s,headers:{"content-type":"text/html; charset=utf-8"}});
 
@@ -12,9 +13,36 @@ async function api(e,m,p){
 
 async function say(e,c,t,k){
  return api(e,"sendMessage",{
-  chat_id:c,text:t,parse_mode:"HTML",
+  chat_id:c,
+  text:t,
+  parse_mode:"HTML",
   ...(k?{reply_markup:{inline_keyboard:k}}:{})
  });
+}
+
+// إنشاء جدول إعدادات الرسائل تلقائياً
+async function init(e){
+ await e.DB.prepare(`
+  CREATE TABLE IF NOT EXISTS settings(
+   key TEXT PRIMARY KEY,
+   value TEXT NOT NULL
+  )
+ `).run();
+}
+
+async function getSetting(e,key,fallback){
+ const x=await e.DB.prepare(
+  "SELECT value FROM settings WHERE key=?"
+ ).bind(key).first();
+
+ return x?.value ?? fallback;
+}
+
+async function setSetting(e,key,value){
+ await e.DB.prepare(`
+  INSERT INTO settings(key,value) VALUES(?,?)
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value
+ `).bind(key,value).run();
 }
 
 function meta(m){
@@ -33,7 +61,8 @@ function meta(m){
  let v=b.match(/\bv?\d+(?:\.\d+){0,3}\b/i);
 
  return {
-  game,developer:dev,
+  game,
+  developer:dev,
   version:v?v[0]:"Unspecified",
   title:(b.split("\n").find(x=>x.trim())||"Channel post").slice(0,180),
   body:b.slice(0,4000)
@@ -42,15 +71,25 @@ function meta(m){
 
 async function index(e,m){
  const x=meta(m);
+
  await e.DB.prepare(`
  INSERT INTO posts(chat_id,message_id,game,developer,version,title,body,created_at)
  VALUES(?,?,?,?,?,?,?,?)
  ON CONFLICT(chat_id,message_id) DO UPDATE SET
- game=excluded.game,developer=excluded.developer,
- version=excluded.version,title=excluded.title,body=excluded.body
+ game=excluded.game,
+ developer=excluded.developer,
+ version=excluded.version,
+ title=excluded.title,
+ body=excluded.body
  `).bind(
-  String(m.chat.id),m.message_id,x.game,x.developer,
-  x.version,x.title,x.body,m.date||Date.now()/1000|0
+  String(m.chat.id),
+  m.message_id,
+  x.game,
+  x.developer,
+  x.version,
+  x.title,
+  x.body,
+  m.date||Date.now()/1000|0
  ).run();
 }
 
@@ -62,12 +101,10 @@ async function menu(e,c){
  if(!results.length)
   return say(e,c,"لا توجد منشورات مفهرسة بعد.");
 
- return say(e,c,"اختر اللعبة:",
-  results.map(x=>[{
-   text:`${x.game} (${x.n})`,
-   callback_data:`g|${encodeURIComponent(x.game)}`
-  }])
- );
+ return say(e,c,"اختر اللعبة:",results.map(x=>[{
+  text:`${x.game} (${x.n})`,
+  callback_data:`g|${encodeURIComponent(x.game)}`
+ }]));
 }
 
 async function cb(e,q){
@@ -80,6 +117,7 @@ async function cb(e,q){
 
  if(p[0]==="g"){
   const game=decodeURIComponent(p[1]);
+
   const {results=[]}=await e.DB.prepare(
    "SELECT developer,COUNT(*) n FROM posts WHERE game=? GROUP BY developer"
   ).bind(game).all();
@@ -112,6 +150,7 @@ async function cb(e,q){
 
  if(p[0]==="v"){
   const vals=p.slice(1).map(decodeURIComponent);
+
   const {results=[]}=await e.DB.prepare(
    "SELECT id,title FROM posts WHERE game=? AND developer=? AND version=? ORDER BY created_at DESC LIMIT 25"
   ).bind(...vals).all();
@@ -161,17 +200,22 @@ body{
  border-radius:12px;
  margin:14px 0
 }
-input,button{
+input,textarea,button{
  box-sizing:border-box;
  width:100%;
  padding:12px;
  margin:6px 0;
- border-radius:7px
+ border-radius:7px;
+ font:inherit
 }
-input{
+input,textarea{
  background:#0e1726;
  color:white;
  border:1px solid #567
+}
+textarea{
+ min-height:110px;
+ resize:vertical
 }
 button{
  background:#2563eb;
@@ -198,6 +242,19 @@ small{color:#aab}
 </div>
 
 <div class="card">
+ <h3>✉️ إعداد رسائل البوت</h3>
+
+ <label>رسالة الترحيب</label>
+ <textarea id="welcome" placeholder="اكتب رسالة الترحيب هنا"></textarea>
+
+ <label>الرسالة الثانية التي تظهر بعدها</label>
+ <textarea id="after" placeholder="اكتب الرسالة الثانية هنا"></textarea>
+
+ <button onclick="saveSettings()">حفظ الرسائل</button>
+ <small>تظهر الرسالتان عند إرسال /start.</small>
+</div>
+
+<div class="card">
  <h3>➕ إضافة إصدار جديد</h3>
 
  <input id="game" placeholder="اللعبة مثال: eFootball 27">
@@ -206,7 +263,7 @@ small{color:#aab}
 
  <input id="ver" placeholder="اسم الإصدار مثال: eFootXi 1.7">
 
- <input id="url" placeholder="رابط المنشور https://t.me/teamadt/123">
+ <input id="url" placeholder="رابط المنشور https://t.me/effotball_dz/481">
 
  <button onclick="add()">حفظ الإصدار</button>
 </div>
@@ -230,17 +287,41 @@ async function load(){
 
  $("s").textContent=r.ok?"تم الاتصال":"خطأ "+r.status;
 
+ if(!r.ok)return;
+
  $("items").innerHTML=(d.items||[]).map(x=>
   '<div class="item"><b>'+safe(x.title)+'</b><br>'+
   '<small>'+safe(x.game)+' / '+safe(x.developer)+' / '+safe(x.version)+'</small><br>'+
   '<small>'+safe(x.chat_id)+' / '+x.message_id+'</small></div>'
  ).join("");
+
+ let sr=await fetch("/api/admin/settings",{headers:H()});
+ let sd=await sr.json();
+
+ if(sr.ok){
+  $("welcome").value=sd.welcome||"";
+  $("after").value=sd.after||"";
+ }
 }
 
 function safe(x){
  return String(x??"").replace(/[&<>"']/g,c=>({
   "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
  }[c]));
+}
+
+async function saveSettings(){
+ let r=await fetch("/api/admin/settings",{
+  method:"POST",
+  headers:H(),
+  body:JSON.stringify({
+   welcome:$("welcome").value,
+   after:$("after").value
+  })
+ });
+
+ let d=await r.json();
+ $("s").textContent=r.ok?"تم حفظ رسائل البوت":"فشل الحفظ: "+(d.error||r.status);
 }
 
 async function add(){
@@ -293,10 +374,11 @@ async function admin(req,e){
    return j({error:"رابط غير صالح"},400);
   }
 
-  const m=u.pathname.match(/^\/(?:s\/)?(teamadt)\/(\d+)\/?$/);
+  // قبول أي قناة عامة باسم مستخدم صالح
+  const m=u.pathname.match(/^\/(?:s\/)?([A-Za-z0-9_]{5,32})\/(\d+)\/?$/);
 
   if(!["t.me","www.t.me","telegram.me"].includes(u.hostname)||!m)
-   return j({error:"ضع رابط منشور من قناة https://t.me/teamadt/123"},400);
+   return j({error:"ضع رابط منشور من قناة عامة مثل https://t.me/effotball_dz/481"},400);
 
   if(!x.game||!x.developer||!x.version)
    return j({error:"أكمل اللعبة والمطور واسم الإصدار"},400);
@@ -324,32 +406,67 @@ async function admin(req,e){
  return j({error:"Method not allowed"},405);
 }
 
+async function settingsAPI(req,e){
+ if(req.headers.get("Authorization")!==`Bearer ${e.ADMIN_PASSWORD}`)
+  return j({error:"Unauthorized"},401);
+
+ if(req.method==="GET"){
+  return j({
+   welcome:await getSetting(e,"welcome","مرحباً بك في <b>Adt Bot</b> ⚽"),
+   after:await getSetting(e,"after","اختر ما تريد تصفحه من الألعاب:")
+  });
+ }
+
+ if(req.method==="POST"){
+  const x=await req.json();
+
+  await setSetting(e,"welcome",String(x.welcome||""));
+  await setSetting(e,"after",String(x.after||""));
+
+  return j({ok:true});
+ }
+
+ return j({error:"Method not allowed"},405);
+}
+
 export default{
  async fetch(r,e){
   const u=new URL(r.url);
 
   try{
+   await init(e);
+
    if(u.pathname==="/telegram/webhook"&&r.method==="POST"){
     if(r.headers.get("X-Telegram-Bot-Api-Secret-Token")!==e.WEBHOOK_SECRET)
      return new Response("Forbidden",{status:403});
 
     const x=await r.json();
 
-    if(x.channel_post)
+    if(x.channel_post){
      await index(e,x.channel_post);
+    }
 
-    else if(x.callback_query)
+    else if(x.callback_query){
      await cb(e,x.callback_query);
+    }
 
     else if(x.message?.text){
      const m=x.message;
      const t=m.text.trim();
 
      if(["/start","/menu","/games"].includes(t)){
-      await say(e,m.chat.id,
-       "مرحباً بك في <b>Adt Bot</b> ⚽",
-       [[{text:"📚 تصفح الألعاب",callback_data:"home"}]]
+      const welcome=await getSetting(
+       e,"welcome","مرحباً بك في <b>Adt Bot</b> ⚽"
       );
+
+      const after=await getSetting(
+       e,"after","اختر ما تريد تصفحه من الألعاب:"
+      );
+
+      await say(e,m.chat.id,welcome);
+      await say(e,m.chat.id,after,[
+       [{text:"📚 تصفح الألعاب",callback_data:"home"}]
+      ]);
      }
 
      else if(t.startsWith("/search ")){
@@ -381,6 +498,9 @@ export default{
 
    if(u.pathname==="/api/admin/items")
     return admin(r,e);
+
+   if(u.pathname==="/api/admin/settings")
+    return settingsAPI(r,e);
 
    if(u.pathname==="/health")
     return j({ok:true});
